@@ -1,0 +1,328 @@
+{
+  "name": "AI Chatbot - Claude Integration",
+  "nodes": [
+    {
+      "parameters": {
+        "updates": ["message"]
+      },
+      "name": "Telegram Message Trigger",
+      "type": "n8n-nodes-base.telegramTrigger",
+      "position": [250, 400],
+      "webhookId": "ai-chatbot-trigger"
+    },
+    {
+      "parameters": {
+        "functionCode": "// Extract user message and info\nconst message = $input.item.json.message;\nconst text = message.text || '';\nconst chatId = message.chat.id;\nconst userId = message.from.id;\nconst username = message.from.username || message.from.first_name;\n\n// Check if message is a command (skip AI for commands)\nconst isCommand = text.startsWith('/');\n\nreturn {\n  json: {\n    text,\n    chatId,\n    userId,\n    username,\n    isCommand,\n    timestamp: new Date().toISOString()\n  }\n};"
+      },
+      "name": "Extract Message Info",
+      "type": "n8n-nodes-base.code",
+      "position": [450, 400]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "boolean": [
+            {
+              "value1": "={{$json.isCommand}}",
+              "value2": false
+            }
+          ]
+        }
+      },
+      "name": "IF Not Command",
+      "type": "n8n-nodes-base.if",
+      "position": [650, 400]
+    },
+    {
+      "parameters": {
+        "authentication": "oAuth2",
+        "operation": "read",
+        "sheetName": "Conversation_History",
+        "range": "A:F",
+        "options": {}
+      },
+      "name": "Get Conversation History",
+      "type": "n8n-nodes-base.googleSheets",
+      "position": [850, 350]
+    },
+    {
+      "parameters": {
+        "authentication": "oAuth2",
+        "operation": "read",
+        "sheetName": "Master_Bookings",
+        "range": "A:K",
+        "options": {}
+      },
+      "name": "Get Available Rooms",
+      "type": "n8n-nodes-base.googleSheets",
+      "position": [850, 450]
+    },
+    {
+      "parameters": {
+        "authentication": "oAuth2",
+        "operation": "read",
+        "sheetName": "Master_Guests",
+        "range": "A:I",
+        "options": {}
+      },
+      "name": "Get Guest Data",
+      "type": "n8n-nodes-base.googleSheets",
+      "position": [850, 550]
+    },
+    {
+      "parameters": {
+        "functionCode": "// Prepare context for Claude API\nconst currentMessage = $('Extract Message Info').item.json;\nconst history = $('Get Conversation History').all();\nconst bookings = $('Get Available Rooms').all();\nconst guests = $('Get Guest Data').all();\n\n// Filter conversation history for this user (last 10 messages)\nconst userHistory = history\n  .filter(h => h.json.user_id === currentMessage.userId.toString())\n  .slice(-10)\n  .map(h => ({\n    role: h.json.role,\n    content: h.json.message\n  }));\n\n// Calculate room availability\nconst today = new Date();\nconst availableRooms = {\n  standard_400: { available: 15, price: 400 },\n  deluxe_500: { available: 10, price: 500 },\n  superior_800: { available: 8, price: 800 },\n  suite_1000: { available: 5, price: 1000 },\n  premium_1200: { available: 3, price: 1200 }\n};\n\n// Count occupied rooms from bookings\nbookings.forEach(b => {\n  const booking = b.json;\n  if (booking.status === 'Confirmed' || booking.status === 'Checked-in') {\n    const price = parseInt(booking.total_amount) / 2; // Assume 2 nights average\n    if (price === 400) availableRooms.standard_400.available--;\n    else if (price === 500) availableRooms.deluxe_500.available--;\n    else if (price === 800) availableRooms.superior_800.available--;\n    else if (price === 1000) availableRooms.suite_1000.available--;\n    else if (price === 1200) availableRooms.premium_1200.available--;\n  }\n});\n\n// Check if user is existing customer\nconst existingGuest = guests.find(g => \n  g.json.guest_id === `CM${currentMessage.userId}`\n);
+\nreturn {\n  json: {\n    userId: currentMessage.userId,\n    username: currentMessage.username,\n    currentMessage: currentMessage.text,\n    conversationHistory: userHistory,\n    availableRooms,\n    isExistingCustomer: !!existingGuest,\n    guestInfo: existingGuest ? existingGuest.json : null,\n    hotelInfo: {\n      name: 'VIPAT Hotel',\n      location: 'อุดรธานี',\n      checkInTime: '14:00',\n      checkOutTime: '12:00',\n      amenities: ['WiFi ฟรี', 'ที่จอดรถ', 'ห้องอาหาร', 'ฟิตเนส'],\n      policies: [\n        'ยกเลิกฟรีก่อน 24 ชั่วโมง',\n        'เด็กต่ำกว่า 6 ปีพักฟรี',\n        'สัตว์เลี้ยงไม่อนุญาต'\n      ]\n    }\n  }\n};"
+      },
+      "name": "Prepare Claude Context",
+      "type": "n8n-nodes-base.code",
+      "position": [1050, 400]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.anthropic.com/v1/messages",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "anthropic-version",
+              "value": "2023-06-01"
+            },
+            {
+              "name": "content-type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": []
+        },
+        "options": {},
+        "bodyParametersJson": "={\n  \"model\": \"claude-sonnet-4-20250514\",\n  \"max_tokens\": 2000,\n  \"system\": \"คุณคือ AI Assistant ของโรงแรม VIPAT Hotel ที่อุดรธานี\\n\\nบทบาทและหน้าที่:\n- ช่วยลูกค้าจองห้องพัก ตอบคำถามเกี่ยวกับโรงแรม\n- พูดคุยเป็นกันเอง เป็นมิตร ใช้ภาษาไทย\n- แนะนำห้องที่เหมาะสมตามความต้องการและงบประมาณ\n- เก็บข้อมูลลูกค้าเพื่อการจอง: ชื่อ, เบอร์โทร, วันเข้า-ออก, จำนวนคน\n\\nข้อมูลโรงแรม:\n- ชื่อ: {{ $json.hotelInfo.name }}\n- สถานที่: {{ $json.hotelInfo.location }}\n- เช็คอิน: {{ $json.hotelInfo.checkInTime }}\n- เช็คเอาท์: {{ $json.hotelInfo.checkOutTime }}\n- สิ่งอำนวยความสะดวก: {{ $json.hotelInfo.amenities.join(', ') }}\n- นโยบาย: {{ $json.hotelInfo.policies.join('; ') }}\n\\nห้องพักที่มี:\n{% for room, data in $json.availableRooms %}\\n- {{ room }}: {{ data.available }} ห้องว่าง, ราคา {{ data.price }} บาท/คืน\n{% endfor %}\\n\\nเมื่อลูกค้าต้องการจอง:\n1. เก็บข้อมูล: ชื่อ, เบอร์โทร, วันเข้า-ออก, ประเภทห้อง, จำนวนคน\n2. ตอบในรูปแบบ JSON:\n{\\n  \\\"action\\\": \\"create_booking\\\",\\n  \\\"data\\\": {\\n    \\\"guest_name\\\": \\"...\\\",\\n    \\\"phone\\\": \\"...\\\",\\n    \\\"check_in\\\": \\"DD/MM/YYYY\\\",\\n    \\\"check_out\\\": \\"DD/MM/YYYY\\\",\\n    \\\"room_type\\\": \\"...\\\",\\n    \\\"pax\\\": 2\\n  }\\n}\\n\\nหากเป็นการสนทนาทั่วไป ตอบแบบปกติ ไม่ต้องใช้ JSON\",\n  "messages": [
+    {% if $json.conversationHistory.length > 0 %}
+      {% for msg in $json.conversationHistory %}
+        {
+          "role": "{{ msg.role }}",
+          "content": "{{ msg.content }}"
+        },
+      {% endfor %}
+    {% endif %}
+    {
+      "role": "user",
+      "content": "{{ $json.currentMessage }}"
+    }
+  ]
+}" 
+      },
+      "name": "Claude API Call",
+      "type": "n8n-nodes-base.httpRequest",
+      "position": [1250, 400],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "claude_api_key",
+          "name": "Claude API Key"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "functionCode": "// Process Claude's response\nconst response = $input.item.json;\nconst claudeMessage = response.content[0].text;\nconst userContext = $('Prepare Claude Context').item.json;\n\n// Check if response contains booking action\nlet hasBookingAction = false;\nlet bookingData = null;\n\ntry {\n  // Try to parse JSON if present\n  const jsonMatch = claudeMessage.match(/\\{[\\s\\S]*\\\"action\\\"[\\s\\S]*\\}/);  \n  if (jsonMatch) {\n    const parsed = JSON.parse(jsonMatch[0]);\n    if (parsed.action === 'create_booking') {\n      hasBookingAction = true;\n      bookingData = parsed.data;\n    }\n  }\n} catch (e) {\n  // Not a booking action, just normal conversation\n}\n\n// Clean message (remove JSON if present)\nconst cleanMessage = claudeMessage.replace(/\\{[\\s\\S]*\\\"action\\\"[\\s\\S]*\\}/, '').trim();\n\nreturn {\n  json: {\n    userId: userContext.userId,\n    chatId: $('Extract Message Info').item.json.chatId,\n    aiResponse: cleanMessage || 'ได้รับข้อมูลการจองแล้วค่ะ กำลังดำเนินการ...',\n    hasBookingAction,\n    bookingData,\n    timestamp: new Date().toISOString()\n  }\n};"
+      },
+      "name": "Process AI Response",
+      "type": "n8n-nodes-base.code",
+      "position": [1450, 400]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "boolean": [
+            {
+              "value1": "={{$json.hasBookingAction}}",
+              "value2": true
+            }
+          ]
+        }
+      },
+      "name": "IF Booking Action",
+      "type": "n8n-nodes-base.if",
+      "position": [1650, 400]
+    },
+    {
+      "parameters": {
+        "functionCode": "// Generate booking ID\nconst bookingData = $input.item.json.bookingData;\nconst date = new Date();\nconst bookingId = `VP${date.getFullYear()}${String(date.getMonth()+1).padStart(2,'0')}${Math.floor(Math.random()*10000).toString().padStart(4,'0')}`\nconst guestId = `CM${$input.item.json.userId}`\n\n// Determine room type and price\nlet roomType = '';\nlet price = 0;\n\nif (bookingData.room_type.includes('Standard') || bookingData.room_type.includes('400')) {\n  roomType = 'B';\n  price = 400;\n} else if (bookingData.room_type.includes('Deluxe') || bookingData.room_type.includes('500')) {\n  roomType = 'A';\n  price = 500;\n} else if (bookingData.room_type.includes('Superior') || bookingData.room_type.includes('800')) {\n  roomType = 'B';\n  price = 800;\n} else if (bookingData.room_type.includes('Suite') || bookingData.room_type.includes('1000')) {\n  roomType = 'A';\n  price = 1000;\n} else {\n  roomType = 'N';\n  price = 1200;\n}\n\n// Calculate nights and total\nconst checkIn = new Date(bookingData.check_in.split('/').reverse().join('-'));\nconst checkOut = new Date(bookingData.check_out.split('/').reverse().join('-'));\nconst nights = Math.ceil((checkOut - checkIn) / (1000 * 60 * 60 * 24));\nconst totalAmount = price * nights;\n\nreturn {\n  json: {\n    booking_id: bookingId,\n    guest_id: guestId,\n    guest_name: bookingData.guest_name,\n    phone: bookingData.phone,\n    room_id: `${roomType}101`, // Assign first available room\n    check_in_date: bookingData.check_in,\n    check_out_date: bookingData.check_out,\n    status: 'Confirmed',\n    channel: 'Telegram AI',\n    pax: bookingData.pax,\n    total_amount: totalAmount,\n    payment_status: 'Pending',\n    created_at: new Date().toISOString()\n  }\n};"
+      },
+      "name": "Create Booking Data",
+      "type": "n8n-nodes-base.code",
+      "position": [1850, 300]
+    },
+    {
+      "parameters": {
+        "authentication": "oAuth2",
+        "operation": "append",
+        "sheetName": "Master_Bookings",
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "booking_id": "={{$json.booking_id}}",
+            "guest_id": "={{$json.guest_id}}",
+            "room_id": "={{$json.room_id}}",
+            "check_in_date": "={{$json.check_in_date}}",
+            "check_out_date": "={{$json.check_out_date}}",
+            "status": "={{$json.status}}",
+            "channel": "={{$json.channel}}",
+            "pax": "={{$json.pax}}",
+            "total_amount": "={{$json.total_amount}}",
+            "payment_status": "={{$json.payment_status}}",
+            "created_at": "={{$json.created_at}}"
+          }
+        },
+        "options": {}
+      },
+      "name": "Save Booking to DB",
+      "type": "n8n-nodes-base.googleSheets",
+      "position": [2050, 300]
+    },
+    {
+      "parameters": {
+        "chatId": "={{$('Process AI Response').item.json.chatId}}",
+        "text": "={{$('Process AI Response').item.json.aiResponse}}\n\n✅ *การจองสำเร็จ!*\n\n📋 Booking ID: {{$json.booking_id}}\n🏨 ห้อง: {{$json.room_id}}\n📅 เข้าพัก: {{$json.check_in_date}}\n📅 เช็คเอาท์: {{$json.check_out_date}}\n👥 จำนวนผู้เข้าพัก: {{$json.pax}} คน\n💰 ยอดชำระ: {{$json.total_amount}} บาท\n\n💳 ต้องการชำระเงินเลยหรือไม่?",
+        "additionalFields": {
+          "parse_mode": "Markdown",
+          "reply_markup": {
+            "inline_keyboard": [
+              [
+                {
+                  "text": "💳 ชำระเงินเลย",
+                  "callback_data": "pay_{{$json.booking_id}}"
+                }
+              ],
+              [
+                {
+                  "text": "📋 ดูรายละเอียด",
+                  "callback_data": "view_{{$json.booking_id}}"
+                },
+                {
+                  "text": "❌ ยกเลิก",
+                  "callback_data": "cancel_{{$json.booking_id}}"
+                }
+              ]
+            ]
+          }
+        }
+      },
+      "name": "Send Booking Confirmation",
+      "type": "n8n-nodes-base.telegram",
+      "position": [2250, 300]
+    },
+    {
+      "parameters": {
+        "chatId": "={{$json.chatId}}",
+        "text": "={{$json.aiResponse}}",
+        "additionalFields": {
+          "parse_mode": "Markdown"
+        }
+      },
+      "name": "Send AI Response Only",
+      "type": "n8n-nodes-base.telegram",
+      "position": [1850, 500]
+    },
+    {
+      "parameters": {
+        "authentication": "oAuth2",
+        "operation": "append",
+        "sheetName": "Conversation_History",
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "user_id": "={{$('Extract Message Info').item.json.userId}}",
+            "username": "={{$('Extract Message Info').item.json.username}}",
+            "role": "user",
+            "message": "={{$('Extract Message Info').item.json.text}}",
+            "timestamp": "={{$('Extract Message Info').item.json.timestamp}}"
+          }
+        }
+      },
+      "name": "Save User Message",
+      "type": "n8n-nodes-base.googleSheets",
+      "position": [2050, 500]
+    },
+    {
+      "parameters": {
+        "authentication": "oAuth2",
+        "operation": "append",
+        "sheetName": "Conversation_History",
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "user_id": "={{$('Process AI Response').item.json.userId}}",
+            "username": "={{$('Prepare Claude Context').item.json.username}}",
+            "role": "assistant",
+            "message": "={{$('Process AI Response').item.json.aiResponse}}",
+            "timestamp": "={{$('Process AI Response').item.json.timestamp}}"
+          }
+        }
+      },
+      "name": "Save AI Response",
+      "type": "n8n-nodes-base.googleSheets",
+      "position": [2250, 500]
+    }
+  ],
+  "connections": {
+    "Telegram Message Trigger": {
+      "main": [[{"node": "Extract Message Info", "type": "main", "index": 0}]]
+    },
+    "Extract Message Info": {
+      "main": [[{"node": "IF Not Command", "type": "main", "index": 0}]]
+    },
+    "IF Not Command": {
+      "main": [
+        [{"node": "Get Conversation History", "type": "main", "index": 0},
+         {"node": "Get Available Rooms", "type": "main", "index": 0},
+         {"node": "Get Guest Data", "type": "main", "index": 0}]
+      ]
+    },
+    "Get Conversation History": {
+      "main": [[{"node": "Prepare Claude Context", "type": "main", "index": 0}]]
+    },
+    "Get Available Rooms": {
+      "main": [[{"node": "Prepare Claude Context", "type": "main", "index": 0}]]
+    },
+    "Get Guest Data": {
+      "main": [[{"node": "Prepare Claude Context", "type": "main", "index": 0}]]
+    },
+    "Prepare Claude Context": {
+      "main": [[{"node": "Claude API Call", "type": "main", "index": 0}]]
+    },
+    "Claude API Call": {
+      "main": [[{"node": "Process AI Response", "type": "main", "index": 0}]]
+    },
+    "Process AI Response": {
+      "main": [[{"node": "IF Booking Action", "type": "main", "index": 0}]]
+    },
+    "IF Booking Action": {
+      "main": [
+        [{"node": "Create Booking Data", "type": "main", "index": 0}],
+        [{"node": "Send AI Response Only", "type": "main", "index": 0}]
+      ]
+    },
+    "Create Booking Data": {
+      "main": [[{"node": "Save Booking to DB", "type": "main", "index": 0}]]
+    },
+    "Save Booking to DB": {
+      "main": [[{"node": "Send Booking Confirmation", "type": "main", "index": 0}]]
+    },
+    "Send AI Response Only": {
+      "main": [[{"node": "Save User Message", "type": "main", "index": 0}]]
+    },
+    "Send Booking Confirmation": {
+      "main": [[{"node": "Save AI Response", "type": "main", "index": 0}]]
+    },
+    "Save User Message": {
+      "main": [[{"node": "Save AI Response", "type": "main", "index": 0}]]
+    }
+  }
+}
