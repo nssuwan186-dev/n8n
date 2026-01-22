@@ -41,6 +41,7 @@ import {
 	FORM_TRIGGER_NODE_TYPE,
 	NodeOperationError,
 	OperationalError,
+	tryToParseUrl,
 	UnexpectedError,
 	WAIT_NODE_TYPE,
 	WorkflowConfigurationError,
@@ -57,6 +58,7 @@ import type {
 
 import { ActiveExecutions } from '@/active-executions';
 import { MCP_TRIGGER_NODE_TYPE } from '@/constants';
+import { EventService } from '@/events/event.service';
 import { InternalServerError } from '@/errors/response-errors/internal-server.error';
 import { NotFoundError } from '@/errors/response-errors/not-found.error';
 import { UnprocessableRequestError } from '@/errors/response-errors/unprocessable.error';
@@ -234,10 +236,20 @@ export const handleFormRedirectionCase = (
 		(data?.headers as IDataObject)?.location &&
 		String(data?.responseCode).startsWith('3')
 	) {
+		const locationUrl = String((data?.headers as IDataObject)?.location);
+		let validatedUrl: string | undefined;
+		try {
+			validatedUrl = tryToParseUrl(locationUrl);
+		} catch {
+			// Invalid URL, don't redirect
+		}
+
 		data.responseCode = 200;
-		data.data = {
-			redirectURL: (data?.headers as IDataObject)?.location,
-		};
+		if (validatedUrl) {
+			data.data = {
+				redirectURL: validatedUrl,
+			};
+		}
 		(data.headers as IDataObject).location = undefined;
 	}
 
@@ -623,6 +635,13 @@ export async function executeWebhook(
 			executionId,
 			responsePromise,
 		);
+
+		Container.get(EventService).emit('workflow-executed', {
+			workflowId: workflowData.id,
+			workflowName: workflowData.name,
+			executionId,
+			source: 'webhook',
+		});
 
 		if (responseMode === 'formPage' && !didSendResponse) {
 			res.send({ formWaitingUrl: `${additionalData.formWaitingBaseUrl}/${executionId}` });
